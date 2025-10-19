@@ -221,7 +221,7 @@ impl eframe::App for PdfCompressor {
                                         format_file_size(result.original_size),
                                         format_file_size(result.compressed_size),
                                         if result.original_size > 0 {
-                                            ((result.original_size - result.compressed_size) * 100 / result.original_size)
+                                            (result.original_size - result.compressed_size) * 100 / result.original_size
                                         } else {
                                             0
                                         }
@@ -292,13 +292,25 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([800.0, 600.0])
-            .with_title("PDF Compressor"),
+            .with_min_inner_size([600.0, 400.0])
+            .with_title("PDF Compressor")
+            .with_icon(std::sync::Arc::new(
+                egui::IconData {
+                    rgba: vec![],
+                    width: 0,
+                    height: 0,
+                }
+            )),
         ..Default::default()
     };
 
     eframe::run_native(
         "PDF Compressor",
         options,
-        Box::new(|_cc| Box::new(PdfCompressor::new())),
+        Box::new(|_cc| {
+            // Set up the app with context
+            let app = PdfCompressor::new();
+            Ok(Box::new(app))
+        }),
     )
 }
