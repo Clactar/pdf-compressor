@@ -136,14 +136,15 @@ fn compress_pdf_file(input_path: &Path, output_path: &Path) -> Result<(), String
     let mut doc = Document::load(input_path)
         .map_err(|e| format!("Failed to load PDF: {}", e))?;
 
-    // Compress the PDF by removing unused objects and optimizing streams
+    // Perform multiple rounds of compression for better results
+    for _ in 0..3 {
+        doc.compress();
+        doc.prune_objects();
+        doc.delete_zero_length_streams();
+    }
+
+    // Final cleanup
     doc.compress();
-
-    // Remove unused objects
-    doc.prune_objects();
-
-    // Delete objects that are not referenced
-    doc.delete_zero_length_streams();
 
     // Save the compressed PDF
     doc.save(output_path)
