@@ -8,13 +8,28 @@ use std::thread;
 use std::collections::BTreeMap;
 use log::{info, debug, warn};
 
-#[derive(Default)]
 struct PdfCompressor {
     selected_files: Vec<PathBuf>,
     compression_results: Vec<CompressionResult>,
     is_processing: bool,
     processing_progress: String,
     receiver: Option<Receiver<CompressionResult>>,
+    compression_level: u8, // 0-100, how much to compress (0=minimal, 100=maximum)
+    estimated_size: Option<u64>,
+}
+
+impl Default for PdfCompressor {
+    fn default() -> Self {
+        Self {
+            selected_files: Vec::new(),
+            compression_results: Vec::new(),
+            is_processing: false,
+            processing_progress: String::new(),
+            receiver: None,
+            compression_level: 75, // Default: 75% compression (good balance)
+            estimated_size: None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -26,6 +41,11 @@ struct CompressionResult {
     error_message: Option<String>,
     compressed_path: Option<PathBuf>,
     downloaded: bool,
+}
+
+#[derive(Clone)]
+struct CompressionSettings {
+    quality: u8,
 }
 
 impl Default for CompressionResult {
@@ -56,7 +76,30 @@ impl PdfCompressor {
             self.selected_files = files;
             // Clear previous results when selecting new files
             self.compression_results.clear();
+            // Estimate compressed size
+            self.estimate_compressed_size();
         }
+    }
+    
+    fn estimate_compressed_size(&mut self) {
+        if self.selected_files.is_empty() {
+            self.estimated_size = None;
+            return;
+        }
+        
+        let total_size: u64 = self.selected_files.iter()
+            .filter_map(|path| std::fs::metadata(path).ok())
+            .map(|m| m.len())
+            .sum();
+        
+        // Compression level 0-100 directly maps to reduction %
+        // Level 25 = ~25% reduction (high quality, minimal compression)
+        // Level 50 = ~50% reduction (balanced)
+        // Level 75 = ~75% reduction (good compression) - DEFAULT
+        // Level 90 = ~90% reduction (aggressive)
+        let reduction_factor = (self.compression_level as f64) / 100.0;
+        
+        self.estimated_size = Some((total_size as f64 * (1.0 - reduction_factor)) as u64);
     }
     
     fn download_all(&mut self) {
@@ -107,12 +150,30 @@ impl PdfCompressor {
         self.compression_results.clear();
 
         let files = self.selected_files.clone();
+        // Convert compression level to JPEG quality
+        // Compression 0-25 = JPEG 90-100 (high quality)
+        // Compression 25-50 = JPEG 70-90
+        // Compression 50-75 = JPEG 50-70
+        // Compression 75-100 = JPEG 25-50 (low quality)
+        let jpeg_quality = if self.compression_level <= 25 {
+            100 - (self.compression_level as f32 * 0.4) as u8 // 100 to 90
+        } else if self.compression_level <= 50 {
+            90 - ((self.compression_level - 25) as f32 * 0.8) as u8 // 90 to 70
+        } else if self.compression_level <= 75 {
+            70 - ((self.compression_level - 50) as f32 * 0.8) as u8 // 70 to 50
+        } else {
+            50 - ((self.compression_level - 75) as f32) as u8 // 50 to 25
+        };
+        
+        let settings = CompressionSettings {
+            quality: jpeg_quality,
+        };
         let (tx, rx) = mpsc::channel();
         self.receiver = Some(rx);
 
         thread::spawn(move || {
             for file_path in files {
-                let result = compress_single_pdf(&file_path);
+                let result = compress_single_pdf(&file_path, &settings);
                 let _ = tx.send(result);
             }
         });
@@ -141,7 +202,7 @@ impl PdfCompressor {
     }
 }
 
-fn compress_single_pdf(input_path: &Path) -> CompressionResult {
+fn compress_single_pdf(input_path: &Path, settings: &CompressionSettings) -> CompressionResult {
     let file_name = input_path.file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("Unknown")
@@ -170,7 +231,7 @@ fn compress_single_pdf(input_path: &Path) -> CompressionResult {
     let output_path = temp_dir.join(&output_filename);
     info!("Temp output path: {:?}", output_path);
 
-    match compress_pdf_file(input_path, &output_path) {
+    match compress_pdf_file(input_path, &output_path, settings) {
         Ok(_) => {
             // Get compressed file size
             let compressed_size = match std::fs::metadata(&output_path) {
@@ -210,7 +271,7 @@ fn compress_single_pdf(input_path: &Path) -> CompressionResult {
     }
 }
 
-fn compress_pdf_file(input_path: &Path, output_path: &Path) -> Result<(), String> {
+fn compress_pdf_file(input_path: &Path, output_path: &Path, settings: &CompressionSettings) -> Result<(), String> {
     // Open and parse the PDF
     info!("Loading PDF document...");
     let mut doc = Document::load(input_path)
@@ -231,8 +292,8 @@ fn compress_pdf_file(input_path: &Path, output_path: &Path) -> Result<(), String
     info!("Removed {} duplicate objects", removed);
     
     // Compress images and streams
-    info!("Compressing all streams...");
-    compress_all_streams(&mut doc)?;
+    info!("Compressing all streams with quality {}...", settings.quality);
+    compress_all_streams(&mut doc, settings)?;
     
     // Remove metadata to reduce size
     info!("Removing metadata objects...");
@@ -301,7 +362,7 @@ fn remove_duplicate_objects(doc: &mut Document) -> usize {
     duplicate_count
 }
 
-fn compress_all_streams(doc: &mut Document) -> Result<(), String> {
+fn compress_all_streams(doc: &mut Document, settings: &CompressionSettings) -> Result<(), String> {
     let mut objects_to_update = Vec::new();
 
     // Find all stream objects
@@ -329,7 +390,7 @@ fn compress_all_streams(doc: &mut Document) -> Result<(), String> {
             }
             
             let compressed = if is_image {
-                match compress_image_stream(&stream) {
+                match compress_image_stream(&stream, settings.quality) {
                     Ok(s) => s,
                     Err(e) => {
                         debug!("Image compression failed for {:?}: {}", obj_id, e);
@@ -431,7 +492,7 @@ fn is_image_stream(stream: &Stream) -> bool {
     false
 }
 
-fn compress_image_stream(stream: &Stream) -> Result<Stream, String> {
+fn compress_image_stream(stream: &Stream, quality: u8) -> Result<Stream, String> {
     use image::imageops::FilterType;
     
     // Check filter type - skip if already JPEG
@@ -547,12 +608,21 @@ fn compress_image_stream(stream: &Stream) -> Result<Stream, String> {
         _ => return Err(format!("Unsupported component count: {}", components))
     };
     
-    // Downsample if large
-    let (target_width, target_height) = if width > 1500 || height > 1500 {
-        let scale = 1500.0 / width.max(height) as f32;
+    // Downsample based on quality setting
+    let (target_width, target_height) = if quality < 90 && (width > 1500 || height > 1500) {
+        // More aggressive downsampling for lower quality
+        let max_dimension = if quality >= 70 {
+            1500.0
+        } else if quality >= 50 {
+            1200.0
+        } else {
+            1000.0
+        };
+        
+        let scale = max_dimension / width.max(height) as f32;
         let new_w = (width as f32 * scale) as u32;
         let new_h = (height as f32 * scale) as u32;
-        info!("Downsampling large image: {}x{} -> {}x{}", width, height, new_w, new_h);
+        info!("Downsampling large image (quality {}): {}x{} -> {}x{}", quality, width, height, new_w, new_h);
         (new_w, new_h)
     } else {
         (width, height)
@@ -564,12 +634,12 @@ fn compress_image_stream(stream: &Stream) -> Result<Stream, String> {
         dyn_img
     };
     
-    // Encode as JPEG with quality 75 (good balance)
-    debug!("Encoding as JPEG with quality 75...");
+    // Encode as JPEG with specified quality
+    debug!("Encoding as JPEG with quality {}...", quality);
     let mut compressed = Vec::new();
-    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut compressed, 75);
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut compressed, quality);
     if encoder.encode_image(&final_img).is_ok() {
-        info!("JPEG encoding successful: {} bytes -> {} bytes", original_content_size, compressed.len());
+        info!("JPEG encoding successful: {} bytes -> {} bytes (quality {})", original_content_size, compressed.len(), quality);
         
         let mut new_dict = stream.dict.clone();
         new_dict.set("Filter", Object::Name(b"DCTDecode".to_vec()));
@@ -629,6 +699,65 @@ impl eframe::App for PdfCompressor {
                                 .size(15.0));
                         }
                     });
+                
+                ui.add_space(10.0);
+                
+                // Compression slider
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Compression Level:").size(15.0).strong());
+                    let old_level = self.compression_level;
+                    ui.add(egui::Slider::new(&mut self.compression_level, 10..=95)
+                        .text("")
+                        .suffix("%"));
+                    
+                    // Re-estimate if level changed
+                    if old_level != self.compression_level {
+                        self.estimate_compressed_size();
+                    }
+                });
+                
+                // Show compression description
+                let compression_desc = if self.compression_level <= 25 {
+                    "Low Compression (10-25%) - Best quality, larger file size"
+                } else if self.compression_level <= 50 {
+                    "Medium Compression (25-50%) - Good balance"
+                } else if self.compression_level <= 75 {
+                    "High Compression (50-75%) - Good size reduction (Recommended)"
+                } else {
+                    "Maximum Compression (75-95%) - Smallest files, quality loss visible"
+                };
+                
+                ui.label(RichText::new(compression_desc)
+                    .size(13.0)
+                    .color(Color32::from_rgb(180, 180, 180)));
+                
+                // Show estimated size
+                if let Some(estimated) = self.estimated_size {
+                    let total_original: u64 = self.selected_files.iter()
+                        .filter_map(|path| std::fs::metadata(path).ok())
+                        .map(|m| m.len())
+                        .sum();
+                    
+                    let reduction = if total_original > 0 {
+                        ((total_original - estimated) as f64 / total_original as f64 * 100.0) as u64
+                    } else {
+                        0
+                    };
+                    
+                    ui.add_space(5.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Estimated result:").size(14.0));
+                        ui.label(RichText::new(format!(
+                            "{} → {} (~{}% reduction)",
+                            format_file_size(total_original),
+                            format_file_size(estimated),
+                            reduction
+                        ))
+                        .size(14.0)
+                        .strong()
+                        .color(Color32::from_rgb(100, 200, 255)));
+                    });
+                }
             }
 
             ui.add_space(10.0);
