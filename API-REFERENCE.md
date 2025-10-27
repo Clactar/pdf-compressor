@@ -38,17 +38,19 @@ Compress a PDF or image file with configurable quality settings.
 
 #### Parameters
 
-| Parameter       | Type    | Required | Default | Description                                                                                        |
-| --------------- | ------- | -------- | ------- | -------------------------------------------------------------------------------------------------- |
-| `file`          | file    | **Yes**  | —       | The PDF or image file to compress. Accepted formats: PDF, JPEG, PNG, WebP, TIFF                    |
-| `compression`   | integer | No       | `75`    | Compression level (10-95). Higher values = more compression. Maps to quality inversely.            |
-| `output_format` | string  | No       | `auto`  | Output format for images. Options: `jpeg`, `png`, `webp`, `auto`. PDF files ignore this parameter. |
+| Parameter         | Type    | Required | Default                       | Description                                                                                                                     |
+| ----------------- | ------- | -------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `file`            | file    | **Yes**  | —                             | The PDF or image file to compress. Accepted formats: PDF, JPEG, PNG, WebP, TIFF                                                 |
+| `compression`     | integer | No       | `75`                          | Compression level (10-95). Higher values = more compression. Maps to quality inversely.                                         |
+| `output_format`   | string  | No       | `auto`                        | Output format for images. Options: `jpeg`, `png`, `webp`, `auto`. PDF files ignore this parameter.                              |
+| `output_filename` | string  | No       | `{original-filename}-compressed` | Custom name for output file (extension auto-appended). Only alphanumeric, hyphens, underscores, and spaces allowed. Max 255 characters. |
 
 **Alternative parameter names:**
 
 - `file` can also be `pdf` or `image`
 - `compression` can also be `quality` or `level`
 - `output_format` can also be `format`
+- `output_filename` can also be `filename`
 
 #### Compression Levels
 
@@ -91,6 +93,15 @@ curl -X POST https://your-domain.com/api/compress \
   -F "output_format=jpeg"
 ```
 
+```bash
+curl -X POST https://your-domain.com/api/compress \
+  -H "X-API-Key: your_api_key_here" \
+  -F "file=@invoice.pdf" \
+  -F "compression=70" \
+  -F "output_filename=my-invoice" \
+  -o my-invoice.pdf
+```
+
 #### Response
 
 **Success Response**
@@ -121,7 +132,18 @@ curl -X POST https://your-domain.com/api/compress \
 ```http
 HTTP/1.1 200 OK
 Content-Type: application/pdf
-Content-Disposition: attachment; filename="compressed.pdf"
+Content-Disposition: attachment; filename="invoice-compressed.pdf"
+X-Original-Size: 2457600
+X-Compressed-Size: 614400
+X-Reduction-Percentage: 75.00
+```
+
+When `output_filename` is provided:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="my-invoice.pdf"
 X-Original-Size: 2457600
 X-Compressed-Size: 614400
 X-Reduction-Percentage: 75.00
@@ -164,6 +186,18 @@ X-Reduction-Percentage: 75.00
 ```json
 {
   "error": "Invalid multipart data: <details>"
+}
+```
+
+```json
+{
+  "error": "Invalid output filename: only alphanumeric, hyphens, underscores, and spaces allowed"
+}
+```
+
+```json
+{
+  "error": "Invalid output filename: maximum 255 characters allowed"
 }
 ```
 
@@ -265,6 +299,17 @@ curl -X POST https://your-domain.com/api/compress \
   -F "compression=70" \
   -F "output_format=png" \
   -o compressed_photo.png
+```
+
+**Compress with custom output filename:**
+
+```bash
+curl -X POST https://your-domain.com/api/compress \
+  -H "X-API-Key: sk_live_abc123..." \
+  -F "file=@report.pdf" \
+  -F "compression=75" \
+  -F "output_filename=quarterly-report-2025" \
+  -o quarterly-report-2025.pdf
 ```
 
 ### JavaScript (Node.js)

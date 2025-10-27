@@ -143,10 +143,47 @@ async fn llm_docs() -> (StatusCode, [(&'static str, &'static str); 1], &'static 
     )
 }
 
+/// Sanitize a filename to ensure it's safe for use in filesystem
+/// - Strips any file extension (will be added based on output format)
+/// - Allows only: a-z, A-Z, 0-9, hyphens, underscores, spaces
+/// - Trims whitespace
+/// - Enforces max 255 character limit
+fn sanitize_filename(name: &str) -> Result<String, String> {
+    // Strip any extension by taking everything before the last dot
+    let name_without_ext = if let Some(pos) = name.rfind('.') {
+        &name[..pos]
+    } else {
+        name
+    };
+    
+    // Trim whitespace
+    let trimmed = name_without_ext.trim();
+    
+    // Filter to only allowed characters: alphanumeric, hyphens, underscores, spaces
+    let sanitized: String = trimmed
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == ' ')
+        .collect();
+    
+    // Check if empty after sanitization
+    if sanitized.is_empty() {
+        return Err("Invalid output filename: only alphanumeric, hyphens, underscores, and spaces allowed".to_string());
+    }
+    
+    // Enforce max length
+    if sanitized.len() > 255 {
+        return Err("Invalid output filename: maximum 255 characters allowed".to_string());
+    }
+    
+    Ok(sanitized)
+}
+
 async fn compress_file(mut multipart: Multipart) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     let mut file_data: Option<Vec<u8>> = None;
     let mut compression_level: u8 = 75; // Default 75%
     let mut output_format: Option<String> = None;
+    let mut output_filename: Option<String> = None;
+    let mut original_filename: Option<String> = None;
     
     // Parse multipart form data
     while let Some(field) = multipart.next_field().await.map_err(|e| {
@@ -162,6 +199,11 @@ async fn compress_file(mut multipart: Multipart) -> Result<Response, (StatusCode
         
         match name.as_str() {
             "file" | "pdf" | "image" => {
+                // Extract original filename if available
+                if let Some(filename) = field.file_name() {
+                    original_filename = Some(filename.to_string());
+                }
+                
                 let data = field.bytes().await.map_err(|e| {
                     error!("Failed to read file data: {}", e);
                     (
@@ -211,6 +253,19 @@ async fn compress_file(mut multipart: Multipart) -> Result<Response, (StatusCode
                 output_format = Some(text);
                 info!("Output format set to: {:?}", output_format);
             }
+            "output_filename" | "filename" => {
+                let text = field.text().await.map_err(|e| {
+                    error!("Failed to read output filename: {}", e);
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: format!("Failed to read output filename: {}", e),
+                        }),
+                    )
+                })?;
+                output_filename = Some(text);
+                info!("Output filename set to: {:?}", output_filename);
+            }
             _ => {
                 // Ignore unknown fields
             }
@@ -246,7 +301,7 @@ async fn compress_file(mut multipart: Multipart) -> Result<Response, (StatusCode
           if is_pdf { "PDF" } else { "Image" });
     
     // Compress based on file type - offload CPU-intensive work to blocking thread pool
-    let (compressed_data, content_type, filename) = if is_pdf {
+    let (compressed_data, content_type, extension): (Vec<u8>, &str, String) = if is_pdf {
         let compressed = tokio::task::spawn_blocking(move || {
             crate::compress_pdf_bytes(&file_data, compression_level)
         })
@@ -269,7 +324,7 @@ async fn compress_file(mut multipart: Multipart) -> Result<Response, (StatusCode
                 }),
             )
         })?;
-        (compressed, "application/pdf", "compressed.pdf")
+        (compressed, "application/pdf", "pdf".to_string())
     } else {
         let (compressed, ext) = tokio::task::spawn_blocking(move || {
             crate::compress_image_bytes(
@@ -304,8 +359,34 @@ async fn compress_file(mut multipart: Multipart) -> Result<Response, (StatusCode
             "webp" => "image/webp",
             _ => "application/octet-stream",
         };
-        let fname = format!("compressed.{}", ext);
-        (compressed, mime, fname.leak() as &str)
+        (compressed, mime, ext)
+    };
+    
+    // Determine final output filename
+    let final_filename = if let Some(custom) = output_filename {
+        // User provided custom filename - sanitize it
+        let sanitized = sanitize_filename(&custom).map_err(|e| {
+            error!("Invalid output filename: {}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: e,
+                }),
+            )
+        })?;
+        format!("{}.{}", sanitized, extension)
+    } else if let Some(orig) = original_filename {
+        // Use original filename with "-compressed" suffix
+        // Strip extension from original filename
+        let basename = if let Some(pos) = orig.rfind('.') {
+            &orig[..pos]
+        } else {
+            &orig
+        };
+        format!("{}-compressed.{}", basename, extension)
+    } else {
+        // Fallback to generic name
+        format!("compressed.{}", extension)
     };
     
     let compressed_size = compressed_data.len() as u64;
@@ -316,8 +397,8 @@ async fn compress_file(mut multipart: Multipart) -> Result<Response, (StatusCode
     };
     
     info!(
-        "Compression successful: {} bytes -> {} bytes ({:.2}% reduction)",
-        original_size, compressed_size, reduction
+        "Compression successful: {} bytes -> {} bytes ({:.2}% reduction), output: {}",
+        original_size, compressed_size, reduction, final_filename
     );
     
     // Return compressed file with metadata in headers
@@ -325,7 +406,7 @@ async fn compress_file(mut multipart: Multipart) -> Result<Response, (StatusCode
         StatusCode::OK,
         [
             ("Content-Type", content_type),
-            ("Content-Disposition", &format!("attachment; filename=\"{}\"", filename)),
+            ("Content-Disposition", &format!("attachment; filename=\"{}\"", final_filename)),
             ("X-Original-Size", &original_size.to_string()),
             ("X-Compressed-Size", &compressed_size.to_string()),
             ("X-Reduction-Percentage", &format!("{:.2}", reduction)),

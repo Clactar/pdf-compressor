@@ -58,6 +58,16 @@ PARAMETERS:
    - Default: "auto"
    - Ignored for PDF files (PDFs always output as PDF)
 
+4. output_filename (OPTIONAL)
+   - Type: String
+   - Field names accepted: "output_filename" OR "filename"
+   - Default: "{original-filename}-compressed" (uses uploaded filename with "-compressed" suffix)
+   - Description: Custom name for output file. Extension is automatically appended based on output format.
+   - Validation: Only alphanumeric characters, hyphens (-), underscores (_), and spaces allowed
+   - Maximum length: 255 characters
+   - Any provided extension is stripped and replaced with correct one
+   - If no original filename available, defaults to "compressed.{ext}"
+
 ## COMPRESSION LEVEL MAPPING
 
 The compression parameter maps to JPEG quality inversely:
@@ -141,6 +151,14 @@ OR
 {
   "error": "Invalid multipart data: {details}"
 }
+OR
+{
+  "error": "Invalid output filename: only alphanumeric, hyphens, underscores, and spaces allowed"
+}
+OR
+{
+  "error": "Invalid output filename: maximum 255 characters allowed"
+}
 
 PROCESSING ERROR (HTTP 500):
 {
@@ -205,6 +223,16 @@ curl -X POST https://your-domain.com/api/compress \
   -F "compression=60" \
   -F "output_format=png" \
   -o compressed.png
+```
+
+cURL - Compress with custom output filename:
+```
+curl -X POST https://your-domain.com/api/compress \
+  -H "X-API-Key: your_key_here" \
+  -F "file=@report.pdf" \
+  -F "compression=75" \
+  -F "output_filename=quarterly-report-2025" \
+  -o quarterly-report-2025.pdf
 ```
 
 Python example:
@@ -302,18 +330,26 @@ Recommended client-side limits:
    - For screenshots: Leave as "auto" (will intelligently choose)
    - When unsure: Use "auto" (default)
 
-4. Error Handling:
+4. Output Filename Selection:
+   - For consistent naming: Provide "output_filename" parameter
+   - By default, API appends "-compressed" to original filename
+   - Only use safe characters: alphanumeric, hyphens, underscores, spaces
+   - Don't include file extension - it's added automatically
+   - Max 255 characters
+
+5. Error Handling:
    - Always check HTTP status code first
    - Parse error JSON for specific error messages
    - Check X-Compressed-Size header to verify compression occurred
    - If X-Compressed-Size >= X-Original-Size, compression was ineffective
 
-5. Response Processing:
+6. Response Processing:
    - Save binary response body to file with appropriate extension
    - Extract metadata from response headers for user feedback
    - Calculate and display reduction percentage from headers
+   - Filename returned in Content-Disposition header matches your custom name or default
 
-6. Performance Optimization:
+7. Performance Optimization:
    - For multiple files: Submit in parallel - API is optimized for concurrent requests
    - For large files (>10MB): Use streaming upload if library supports
    - Set appropriate timeout (30-60 seconds for large files)
