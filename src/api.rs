@@ -16,6 +16,18 @@ struct ErrorResponse {
     error: String,
 }
 
+/// Create the router for the API server (exposed for testing)
+pub fn create_router() -> Router {
+    Router::new()
+        .route("/api/compress", post(compress_file))
+        .route("/api/pdf", post(compress_file)) // Legacy alias
+        .route("/health", axum::routing::get(health_check))
+        .route("/llm.txt", axum::routing::get(llm_docs))
+        .layer(middleware::from_fn(auth_middleware))
+        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
+        .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100 MB max
+}
+
 pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logger
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -35,14 +47,7 @@ pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     }
     
     // Build application with routes
-    let app = Router::new()
-        .route("/api/compress", post(compress_file))
-        .route("/api/pdf", post(compress_file)) // Legacy alias
-        .route("/health", axum::routing::get(health_check))
-        .route("/llm.txt", axum::routing::get(llm_docs))
-        .layer(middleware::from_fn(auth_middleware))
-        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
-        .layer(DefaultBodyLimit::max(100 * 1024 * 1024)); // 100 MB max
+    let app = create_router();
     
     // Bind to 0.0.0.0:3000 for container deployment
     let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());

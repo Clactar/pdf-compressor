@@ -2,7 +2,7 @@ use lopdf::{Document, Object, Stream};
 use log::{info, debug};
 use image::{DynamicImage, ImageFormat};
 use rayon::prelude::*;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, AtomicI64, Ordering};
 
 // Export API module for the api binary
 pub mod api;
@@ -149,9 +149,10 @@ fn compress_all_streams(doc: &mut Document, settings: &CompressionSettings) -> R
     let total_streams = objects_to_update.len();
     info!("Processing {} streams in parallel", total_streams);
     
-    let compressed_count = Mutex::new(0);
-    let image_count = Mutex::new(0);
-    let total_saved = Mutex::new(0i64);
+    // Use atomic operations instead of Mutex to avoid lock contention in parallel iterator
+    let compressed_count = AtomicUsize::new(0);
+    let image_count = AtomicUsize::new(0);
+    let total_saved = AtomicI64::new(0);
 
     // Compress streams in parallel using rayon
     // Note: Returning None means "don't update this stream" - the original remains in the document
@@ -159,7 +160,7 @@ fn compress_all_streams(doc: &mut Document, settings: &CompressionSettings) -> R
         .par_iter()
         .filter_map(|(obj_id, stream, is_image, original_size)| {
             if *is_image {
-                *image_count.lock().unwrap() += 1;
+                image_count.fetch_add(1, Ordering::Relaxed);
                 debug!("Processing image stream {:?}, original size: {} bytes", obj_id, original_size);
             }
             
@@ -181,8 +182,8 @@ fn compress_all_streams(doc: &mut Document, settings: &CompressionSettings) -> R
             // Only update if compressed version is smaller
             if new_size < *original_size {
                 let saved = *original_size as i64 - new_size as i64;
-                *total_saved.lock().unwrap() += saved;
-                *compressed_count.lock().unwrap() += 1;
+                total_saved.fetch_add(saved, Ordering::Relaxed);
+                compressed_count.fetch_add(1, Ordering::Relaxed);
                 debug!("Compressed {:?}: {} -> {} bytes (saved {} bytes)", 
                        obj_id, original_size, new_size, saved);
                 Some((*obj_id, compressed))
@@ -201,9 +202,9 @@ fn compress_all_streams(doc: &mut Document, settings: &CompressionSettings) -> R
         doc.objects.insert(obj_id, Object::Stream(compressed_stream));
     }
 
-    let final_compressed = *compressed_count.lock().unwrap();
-    let final_image_count = *image_count.lock().unwrap();
-    let final_saved = *total_saved.lock().unwrap();
+    let final_compressed = compressed_count.load(Ordering::Relaxed);
+    let final_image_count = image_count.load(Ordering::Relaxed);
+    let final_saved = total_saved.load(Ordering::Relaxed);
 
     info!("Compressed {}/{} streams", final_compressed, total_streams);
     info!("Found {} image streams", final_image_count);
