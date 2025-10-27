@@ -1,0 +1,27 @@
+# Build artifacts
+target/
+*.app
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Scripts and configs not needed in container
+build_app.sh
+run_with_logs.sh
+tauri.conf.json
+index.html
+
+# Documentation
+*.md
+README.md
+

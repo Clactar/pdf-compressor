@@ -1,0 +1,201 @@
+{
+  "info": {
+    "name": "PDF Compressor API",
+    "description": "REST API for compressing PDF files with configurable compression levels. Includes API key authentication.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      {
+        "key": "value",
+        "value": "{{api_key}}",
+        "type": "string"
+      },
+      {
+        "key": "key",
+        "value": "X-API-Key",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:3000",
+      "type": "string"
+    },
+    {
+      "key": "api_key",
+      "value": "your-api-key-here",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health Check",
+      "request": {
+        "auth": {
+          "type": "noauth"
+        },
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/health",
+          "host": ["{{base_url}}"],
+          "path": ["health"]
+        },
+        "description": "Check if the API is running. This endpoint does not require authentication."
+      },
+      "response": []
+    },
+    {
+      "name": "Compress PDF - Default (75%)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": [],
+              "description": "Select your PDF file here"
+            },
+            {
+              "key": "compression",
+              "value": "75",
+              "type": "text",
+              "description": "Compression level (10-95)"
+            }
+          ]
+        },
+        "url": {
+          "raw": "{{base_url}}/api/pdf",
+          "host": ["{{base_url}}"],
+          "path": ["api", "pdf"]
+        },
+        "description": "Compress a PDF with default 75% compression level. Good balance between quality and size."
+      },
+      "response": []
+    },
+    {
+      "name": "Compress PDF - Low (25%)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": []
+            },
+            {
+              "key": "compression",
+              "value": "25",
+              "type": "text"
+            }
+          ]
+        },
+        "url": {
+          "raw": "{{base_url}}/api/pdf",
+          "host": ["{{base_url}}"],
+          "path": ["api", "pdf"]
+        },
+        "description": "Low compression (25%) - Best quality, larger file size. Good for documents with important images."
+      },
+      "response": []
+    },
+    {
+      "name": "Compress PDF - Medium (50%)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": []
+            },
+            {
+              "key": "compression",
+              "value": "50",
+              "type": "text"
+            }
+          ]
+        },
+        "url": {
+          "raw": "{{base_url}}/api/pdf",
+          "host": ["{{base_url}}"],
+          "path": ["api", "pdf"]
+        },
+        "description": "Medium compression (50%) - Good balance between quality and size."
+      },
+      "response": []
+    },
+    {
+      "name": "Compress PDF - High (85%)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": []
+            },
+            {
+              "key": "compression",
+              "value": "85",
+              "type": "text"
+            }
+          ]
+        },
+        "url": {
+          "raw": "{{base_url}}/api/pdf",
+          "host": ["{{base_url}}"],
+          "path": ["api", "pdf"]
+        },
+        "description": "High compression (85%) - Smaller files, some quality loss. Good for large documents or archival."
+      },
+      "response": []
+    },
+    {
+      "name": "Compress PDF - Maximum (95%)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": []
+            },
+            {
+              "key": "compression",
+              "value": "95",
+              "type": "text"
+            }
+          ]
+        },
+        "url": {
+          "raw": "{{base_url}}/api/pdf",
+          "host": ["{{base_url}}"],
+          "path": ["api", "pdf"]
+        },
+        "description": "Maximum compression (95%) - Smallest files, visible quality loss. Use only when size is critical."
+      },
+      "response": []
+    }
+  ]
+}
+

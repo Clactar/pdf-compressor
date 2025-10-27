@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  pdfcompressor-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pdfcompressor-api
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - RUST_LOG=info
+      - API_KEY=${API_KEY:-your-secret-api-key-here-change-me}
+    restart: unless-stopped
+    # Resource limits (optional, adjust as needed)
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+

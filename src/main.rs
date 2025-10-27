@@ -1,12 +1,12 @@
+// This is now the GUI binary - for API usage, use the 'api' binary instead
 use eframe::egui;
 use egui::{CentralPanel, Context, ScrollArea, Color32, RichText};
-use lopdf::{Document, Object, Stream};
 use rfd::FileDialog;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::collections::BTreeMap;
 use log::{info, debug, warn};
+use PDFcompressor::{compress_pdf_bytes};
 
 struct PdfCompressor {
     selected_files: Vec<PathBuf>,
@@ -43,10 +43,7 @@ struct CompressionResult {
     downloaded: bool,
 }
 
-#[derive(Clone)]
-struct CompressionSettings {
-    quality: u8,
-}
+// Settings moved to lib.rs - using library function now
 
 impl Default for CompressionResult {
     fn default() -> Self {
@@ -165,15 +162,12 @@ impl PdfCompressor {
             50 - ((self.compression_level - 75) as f32) as u8 // 50 to 25
         };
         
-        let settings = CompressionSettings {
-            quality: jpeg_quality,
-        };
         let (tx, rx) = mpsc::channel();
         self.receiver = Some(rx);
 
         thread::spawn(move || {
             for file_path in files {
-                let result = compress_single_pdf(&file_path, &settings);
+                let result = compress_single_pdf(&file_path, jpeg_quality);
                 let _ = tx.send(result);
             }
         });
@@ -202,7 +196,7 @@ impl PdfCompressor {
     }
 }
 
-fn compress_single_pdf(input_path: &Path, settings: &CompressionSettings) -> CompressionResult {
+fn compress_single_pdf(input_path: &Path, compression_level: u8) -> CompressionResult {
     let file_name = input_path.file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("Unknown")
@@ -231,433 +225,69 @@ fn compress_single_pdf(input_path: &Path, settings: &CompressionSettings) -> Com
     let output_path = temp_dir.join(&output_filename);
     info!("Temp output path: {:?}", output_path);
 
-    match compress_pdf_file(input_path, &output_path, settings) {
-        Ok(_) => {
-            // Get compressed file size
-            let compressed_size = match std::fs::metadata(&output_path) {
-                Ok(metadata) => metadata.len(),
-                Err(_) => 0,
-            };
-            
-            let reduction = if original_size > 0 {
-                (original_size as i64 - compressed_size as i64) as f64 / original_size as f64 * 100.0
-            } else {
-                0.0
-            };
-            
-            info!("Compressed file size: {} bytes", compressed_size);
-            info!("Reduction: {:.2}%", reduction);
-            info!("========================================\n");
+    // Read input file and compress using library
+    match std::fs::read(input_path) {
+        Ok(input_bytes) => {
+            match compress_pdf_bytes(&input_bytes, compression_level) {
+                Ok(compressed_bytes) => {
+                    // Write to temp file
+                    if let Err(e) = std::fs::write(&output_path, &compressed_bytes) {
+                        return CompressionResult {
+                            file_name,
+                            original_size,
+                            compressed_size: 0,
+                            success: false,
+                            error_message: Some(format!("Failed to write output: {}", e)),
+                            compressed_path: None,
+                            downloaded: false,
+                        };
+                    }
+                    
+                    let compressed_size = compressed_bytes.len() as u64;
+                    let reduction = if original_size > 0 {
+                        (original_size as i64 - compressed_size as i64) as f64 / original_size as f64 * 100.0
+                    } else {
+                        0.0
+                    };
+                    
+                    info!("Compressed file size: {} bytes", compressed_size);
+                    info!("Reduction: {:.2}%", reduction);
+                    info!("========================================\n");
 
-            CompressionResult {
-                file_name: output_filename,
-                original_size,
-                compressed_size,
-                success: true,
-                error_message: None,
-                compressed_path: Some(output_path),
-                downloaded: false,
+                    CompressionResult {
+                        file_name: output_filename,
+                        original_size,
+                        compressed_size,
+                        success: true,
+                        error_message: None,
+                        compressed_path: Some(output_path),
+                        downloaded: false,
+                    }
+                }
+                Err(error) => CompressionResult {
+                    file_name,
+                    original_size,
+                    compressed_size: 0,
+                    success: false,
+                    error_message: Some(error),
+                    compressed_path: None,
+                    downloaded: false,
+                }
             }
         }
-        Err(error) => CompressionResult {
+        Err(e) => CompressionResult {
             file_name,
             original_size,
             compressed_size: 0,
             success: false,
-            error_message: Some(error.to_string()),
+            error_message: Some(format!("Failed to read input file: {}", e)),
             compressed_path: None,
             downloaded: false,
         }
     }
 }
 
-fn compress_pdf_file(input_path: &Path, output_path: &Path, settings: &CompressionSettings) -> Result<(), String> {
-    // Open and parse the PDF
-    info!("Loading PDF document...");
-    let mut doc = Document::load(input_path)
-        .map_err(|e| format!("Failed to load PDF: {}", e))?;
-    
-    let total_objects = doc.objects.len();
-    info!("PDF loaded successfully. Total objects: {}", total_objects);
-
-    // Count streams before compression
-    let stream_count = doc.objects.values()
-        .filter(|obj| matches!(obj, Object::Stream(_)))
-        .count();
-    info!("Found {} stream objects", stream_count);
-
-    // Remove duplicate objects
-    info!("Removing duplicate objects...");
-    let removed = remove_duplicate_objects(&mut doc);
-    info!("Removed {} duplicate objects", removed);
-    
-    // Compress images and streams
-    info!("Compressing all streams with quality {}...", settings.quality);
-    compress_all_streams(&mut doc, settings)?;
-    
-    // Remove metadata to reduce size
-    info!("Removing metadata objects...");
-    let before_metadata = doc.objects.len();
-    doc.objects.retain(|_, obj| {
-        if let Object::Dictionary(dict) = obj {
-            if let Ok(Object::Name(name)) = dict.get(b"Type") {
-                return name != b"Metadata";
-            }
-        }
-        true
-    });
-    let metadata_removed = before_metadata - doc.objects.len();
-    info!("Removed {} metadata objects", metadata_removed);
-    
-    // Perform multiple rounds of compression
-    info!("Performing multiple compression rounds...");
-    for i in 0..3 {
-        debug!("Compression round {}", i + 1);
-        doc.compress();
-        doc.prune_objects();
-        doc.delete_zero_length_streams();
-    }
-
-    // Final cleanup
-    info!("Final cleanup...");
-    doc.compress();
-    doc.prune_objects();
-    
-    info!("Final object count: {}", doc.objects.len());
-
-    // Save with compression
-    info!("Saving compressed PDF to: {:?}", output_path);
-    doc.save(output_path)
-        .map_err(|e| format!("Failed to save: {}", e))?;
-    
-    info!("PDF saved successfully");
-
-    Ok(())
-}
-
-fn remove_duplicate_objects(doc: &mut Document) -> usize {
-    let mut unique_streams: BTreeMap<Vec<u8>, lopdf::ObjectId> = BTreeMap::new();
-    let mut to_replace: Vec<(lopdf::ObjectId, lopdf::ObjectId)> = Vec::new();
-
-    // Find duplicate streams
-    for (obj_id, object) in doc.objects.iter() {
-        if let Object::Stream(stream) = object {
-            let content = stream.content.clone();
-            if let Some(&existing_id) = unique_streams.get(&content) {
-                to_replace.push((*obj_id, existing_id));
-                debug!("Found duplicate stream: {:?} is same as {:?}", obj_id, existing_id);
-            } else {
-                unique_streams.insert(content, *obj_id);
-            }
-        }
-    }
-
-    let duplicate_count = to_replace.len();
-    // Replace references to duplicates
-    for (_old_id, _new_id) in to_replace {
-        // Note: Full replacement requires walking the object tree
-        // For now, prune_objects will handle unreferenced objects
-    }
-    
-    duplicate_count
-}
-
-fn compress_all_streams(doc: &mut Document, settings: &CompressionSettings) -> Result<(), String> {
-    let mut objects_to_update = Vec::new();
-
-    // Find all stream objects
-    for (obj_id, object) in doc.objects.iter() {
-        if let Object::Stream(ref stream) = object {
-            let is_image = is_image_stream(stream);
-            let original_size = stream.content.len();
-            objects_to_update.push((*obj_id, is_image, original_size));
-        }
-    }
-
-    let total_streams = objects_to_update.len();
-    info!("Processing {} streams", total_streams);
-    
-    let mut compressed_count = 0;
-    let mut image_count = 0;
-    let mut total_saved = 0i64;
-
-    // Compress each stream
-    for (obj_id, is_image, original_size) in objects_to_update {
-        if let Some(Object::Stream(stream)) = doc.objects.get(&obj_id).cloned() {
-            if is_image {
-                image_count += 1;
-                debug!("Processing image stream {:?}, original size: {} bytes", obj_id, original_size);
-            }
-            
-            let compressed = if is_image {
-                match compress_image_stream(&stream, settings.quality) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        debug!("Image compression failed for {:?}: {}", obj_id, e);
-                        stream.clone()
-                    }
-                }
-            } else {
-                compress_generic_stream(&stream)
-            };
-            
-            let new_size = compressed.content.len();
-            
-            // Only update if it's actually smaller
-            if new_size < original_size {
-                let saved = original_size as i64 - new_size as i64;
-                total_saved += saved;
-                compressed_count += 1;
-                debug!("Compressed {:?}: {} -> {} bytes (saved {} bytes)", 
-                       obj_id, original_size, new_size, saved);
-                doc.objects.insert(obj_id, Object::Stream(compressed));
-            } else {
-                debug!("Keeping original {:?}: compressed would be {} bytes (original {})", 
-                       obj_id, new_size, original_size);
-            }
-        }
-    }
-
-    info!("Compressed {}/{} streams", compressed_count, total_streams);
-    info!("Found {} image streams", image_count);
-    info!("Total bytes saved from stream compression: {}", total_saved);
-
-    Ok(())
-}
-
-fn compress_generic_stream(stream: &Stream) -> Stream {
-    use flate2::write::ZlibEncoder;
-    use flate2::Compression;
-    use std::io::Write;
-    
-    let original_content_size = stream.content.len();
-    
-    // Already compressed? Try to recompress the decompressed content
-    if let Ok(filter) = stream.dict.get(b"Filter") {
-        debug!("Stream has filter: {:?}, attempting recompression", filter);
-        
-        // Try to decompress and recompress with better settings
-        if let Ok(decompressed) = stream.decompressed_content() {
-            debug!("Decompressed content: {} bytes, recompressing...", decompressed.len());
-            
-            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
-            if encoder.write_all(&decompressed).is_ok() {
-                if let Ok(recompressed) = encoder.finish() {
-                    debug!("Recompressed: {} -> {} bytes (was {} bytes)", 
-                           decompressed.len(), recompressed.len(), original_content_size);
-                    
-                    if recompressed.len() < original_content_size {
-                        let mut new_dict = stream.dict.clone();
-                        new_dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
-                        new_dict.set("Length", Object::Integer(recompressed.len() as i64));
-                        info!("Successfully recompressed stream: saved {} bytes", 
-                              original_content_size - recompressed.len());
-                        return Stream::new(new_dict, recompressed);
-                    } else {
-                        debug!("Recompression not beneficial");
-                    }
-                }
-            }
-        } else {
-            debug!("Could not decompress stream for recompression");
-        }
-        
-        return stream.clone();
-    }
-    
-    debug!("Applying Flate compression to uncompressed stream ({} bytes)", original_content_size);
-    
-    // Apply flate compression to uncompressed stream
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
-    if encoder.write_all(&stream.content).is_ok() {
-        if let Ok(compressed) = encoder.finish() {
-            debug!("Flate compressed: {} -> {} bytes", original_content_size, compressed.len());
-            if compressed.len() < original_content_size {
-                let mut new_dict = stream.dict.clone();
-                new_dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
-                new_dict.set("Length", Object::Integer(compressed.len() as i64));
-                return Stream::new(new_dict, compressed);
-            }
-        }
-    }
-    
-    debug!("Flate compression not beneficial");
-    stream.clone()
-}
-
-fn is_image_stream(stream: &Stream) -> bool {
-    if let Ok(Object::Name(ref subtype)) = stream.dict.get(b"Subtype") {
-        return subtype == b"Image";
-    }
-    false
-}
-
-fn compress_image_stream(stream: &Stream, quality: u8) -> Result<Stream, String> {
-    use image::imageops::FilterType;
-    
-    // Check filter type - skip if already JPEG
-    if let Ok(Object::Name(filter)) = stream.dict.get(b"Filter") {
-        let filter_str = std::str::from_utf8(filter).unwrap_or("???");
-        debug!("Image has filter: {:?}", filter_str);
-        
-        if filter == b"DCTDecode" {
-            debug!("Image already JPEG, skipping");
-            return Err("Already JPEG (DCTDecode)".to_string());
-        }
-    }
-    
-    // Get image properties
-    let width = match stream.dict.get(b"Width") {
-        Ok(Object::Integer(w)) => *w as u32,
-        _ => return Err("No width".to_string()),
-    };
-    
-    let height = match stream.dict.get(b"Height") {
-        Ok(Object::Integer(h)) => *h as u32,
-        _ => return Err("No height".to_string()),
-    };
-    
-    debug!("Image dimensions: {}x{}", width, height);
-    
-    let bpc = match stream.dict.get(b"BitsPerComponent") {
-        Ok(Object::Integer(b)) => *b as u32,
-        _ => 8,
-    };
-    debug!("Bits per component: {}", bpc);
-    
-    // Only support 8-bit images
-    if bpc != 8 {
-        return Err(format!("Not 8-bit (bpc={})", bpc));
-    }
-    
-    // Try to get decompressed content
-    debug!("Decompressing image content...");
-    
-    // Manual decompression for FlateDecode since lopdf can't handle indirect ColorSpace
-    let content = if let Ok(Object::Name(filter)) = stream.dict.get(b"Filter") {
-        if filter == b"FlateDecode" {
-            debug!("Manually decompressing FlateDecode stream");
-            use flate2::read::ZlibDecoder;
-            use std::io::Read;
-            
-            let mut decoder = ZlibDecoder::new(&stream.content[..]);
-            let mut decompressed = Vec::new();
-            decoder.read_to_end(&mut decompressed)
-                .map_err(|e| format!("Manual decompression failed: {}", e))?;
-            
-            debug!("Manual decompression successful: {} bytes", decompressed.len());
-            decompressed
-        } else {
-            // Try standard decompression for other filters
-            stream.decompressed_content()
-                .map_err(|e| {
-                    warn!("Standard decompress failed: {:?}", e);
-                    format!("Decompress failed: {:?}", e)
-                })?
-        }
-    } else {
-        // No filter, use raw content
-        debug!("No filter present, using raw content");
-        stream.content.clone()
-    };
-    
-    let original_content_size = content.len();
-    debug!("Decompressed content size: {} bytes", original_content_size);
-    
-    // Determine number of components (RGB=3, RGBA=4, Gray=1, etc)
-    let pixel_count = (width * height) as usize;
-    let components = if original_content_size == pixel_count * 3 {
-        debug!("Detected RGB image (3 components)");
-        3
-    } else if original_content_size == pixel_count * 4 {
-        debug!("Detected RGBA image (4 components)");
-        4
-    } else if original_content_size == pixel_count {
-        debug!("Detected grayscale image (1 component)");
-        1
-    } else {
-        return Err(format!("Unexpected size: {} bytes for {}x{} image", original_content_size, width, height));
-    };
-    
-    // Convert to RGB and encode as JPEG
-    let dyn_img = match components {
-        3 => {
-            // RGB
-            if let Some(img) = image::RgbImage::from_raw(width, height, content) {
-                image::DynamicImage::ImageRgb8(img)
-            } else {
-                return Err("Failed to create RGB image".to_string());
-            }
-        },
-        4 => {
-            // RGBA - convert to RGB
-            if let Some(img) = image::RgbaImage::from_raw(width, height, content) {
-                image::DynamicImage::ImageRgba8(img).to_rgb8().into()
-            } else {
-                return Err("Failed to create RGBA image".to_string());
-            }
-        },
-        1 => {
-            // Grayscale - convert to RGB
-            if let Some(img) = image::GrayImage::from_raw(width, height, content) {
-                image::DynamicImage::ImageLuma8(img).to_rgb8().into()
-            } else {
-                return Err("Failed to create grayscale image".to_string());
-            }
-        },
-        _ => return Err(format!("Unsupported component count: {}", components))
-    };
-    
-    // Downsample based on quality setting
-    let (target_width, target_height) = if quality < 90 && (width > 1500 || height > 1500) {
-        // More aggressive downsampling for lower quality
-        let max_dimension = if quality >= 70 {
-            1500.0
-        } else if quality >= 50 {
-            1200.0
-        } else {
-            1000.0
-        };
-        
-        let scale = max_dimension / width.max(height) as f32;
-        let new_w = (width as f32 * scale) as u32;
-        let new_h = (height as f32 * scale) as u32;
-        info!("Downsampling large image (quality {}): {}x{} -> {}x{}", quality, width, height, new_w, new_h);
-        (new_w, new_h)
-    } else {
-        (width, height)
-    };
-    
-    let final_img = if target_width != width || target_height != height {
-        dyn_img.resize_exact(target_width, target_height, FilterType::Lanczos3)
-    } else {
-        dyn_img
-    };
-    
-    // Encode as JPEG with specified quality
-    debug!("Encoding as JPEG with quality {}...", quality);
-    let mut compressed = Vec::new();
-    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut compressed, quality);
-    if encoder.encode_image(&final_img).is_ok() {
-        info!("JPEG encoding successful: {} bytes -> {} bytes (quality {})", original_content_size, compressed.len(), quality);
-        
-        let mut new_dict = stream.dict.clone();
-        new_dict.set("Filter", Object::Name(b"DCTDecode".to_vec()));
-        new_dict.set("Length", Object::Integer(compressed.len() as i64));
-        new_dict.set("ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
-        
-        if target_width != width || target_height != height {
-            new_dict.set("Width", Object::Integer(target_width as i64));
-            new_dict.set("Height", Object::Integer(target_height as i64));
-        }
-        
-        return Ok(Stream::new(new_dict, compressed));
-    } else {
-        warn!("JPEG encoding failed");
-    }
-    
-    Err("Image encoding failed".to_string())
-}
+// Compression functions moved to lib.rs
 
 impl eframe::App for PdfCompressor {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
