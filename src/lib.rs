@@ -1,6 +1,7 @@
 use lopdf::{Document, Object, Stream};
 use std::collections::BTreeMap;
 use log::{info, debug};
+use image::{DynamicImage, ImageFormat};
 
 // Export API module for the api binary
 pub mod api;
@@ -376,5 +377,191 @@ fn compress_image_stream(stream: &Stream, quality: u8) -> Result<Stream, String>
     }
     
     Err("Image encoding failed".to_string())
+}
+
+/// Compress standalone image from bytes
+/// Returns (compressed_bytes, output_format_extension)
+pub fn compress_image_bytes(
+    input_bytes: &[u8],
+    compression_level: u8,
+    output_format: Option<&str>,
+) -> Result<(Vec<u8>, String), String> {
+    // Clamp compression level
+    let compression_level = compression_level.min(95).max(10);
+    
+    // Convert compression level to quality (same mapping as PDF)
+    let quality = if compression_level <= 25 {
+        100 - (compression_level as f32 * 0.4) as u8
+    } else if compression_level <= 50 {
+        90 - ((compression_level - 25) as f32 * 0.8) as u8
+    } else if compression_level <= 75 {
+        70 - ((compression_level - 50) as f32 * 0.8) as u8
+    } else {
+        50 - ((compression_level - 75) as f32) as u8
+    };
+    
+    info!("Compressing image with quality {}% (compression level {}%)", quality, compression_level);
+    
+    // Detect input format
+    let input_format = image::guess_format(input_bytes)
+        .map_err(|e| format!("Failed to detect image format: {}", e))?;
+    
+    info!("Detected input format: {:?}", input_format);
+    
+    // Load image
+    let img = image::load_from_memory(input_bytes)
+        .map_err(|e| format!("Failed to load image: {}", e))?;
+    
+    let original_size = input_bytes.len();
+    info!("Image loaded: {}x{}, {} bytes", img.width(), img.height(), original_size);
+    
+    // Determine output format
+    let target_format = if let Some(fmt) = output_format {
+        match fmt.to_lowercase().as_str() {
+            "jpg" | "jpeg" => ImageFormat::Jpeg,
+            "png" => ImageFormat::Png,
+            "webp" => ImageFormat::WebP,
+            _ => return Err(format!("Unsupported output format: {}", fmt)),
+        }
+    } else {
+        // Auto-select: JPEG for lossy sources, PNG for lossless
+        // But try both and pick the best
+        match input_format {
+            ImageFormat::Jpeg | ImageFormat::WebP => ImageFormat::Jpeg,
+            _ => {
+                // For lossless sources, try both and pick smaller
+                info!("Trying both JPEG and PNG to find best compression...");
+                let jpeg_result = encode_image_with_quality(&img, quality, ImageFormat::Jpeg);
+                let png_result = encode_image_with_quality(&img, quality, ImageFormat::Png);
+                
+                match (jpeg_result, png_result) {
+                    (Ok(jpeg_bytes), Ok(png_bytes)) => {
+                        let jpeg_size = jpeg_bytes.len();
+                        let png_size = png_bytes.len();
+                        info!("JPEG: {} bytes, PNG: {} bytes", jpeg_size, png_size);
+                        
+                        // If sizes are within 10%, prefer PNG for lossless
+                        if png_size as f64 <= jpeg_size as f64 * 1.1 {
+                            info!("Choosing PNG (lossless and similar size)");
+                            return Ok((png_bytes, "png".to_string()));
+                        } else {
+                            info!("Choosing JPEG (significantly smaller)");
+                            return Ok((jpeg_bytes, "jpg".to_string()));
+                        }
+                    }
+                    (Ok(jpeg_bytes), Err(_)) => {
+                        info!("PNG encoding failed, using JPEG");
+                        return Ok((jpeg_bytes, "jpg".to_string()));
+                    }
+                    (Err(_), Ok(png_bytes)) => {
+                        info!("JPEG encoding failed, using PNG");
+                        return Ok((png_bytes, "png".to_string()));
+                    }
+                    (Err(e1), Err(e2)) => {
+                        return Err(format!("Both JPEG and PNG encoding failed: {} / {}", e1, e2));
+                    }
+                }
+            }
+        }
+    };
+    
+    // Encode with target format
+    let compressed = encode_image_with_quality(&img, quality, target_format)?;
+    let extension = match target_format {
+        ImageFormat::Jpeg => "jpg",
+        ImageFormat::Png => "png",
+        ImageFormat::WebP => "webp",
+        _ => "img",
+    };
+    
+    info!("Image compressed: {} bytes -> {} bytes ({:.2}% reduction)",
+          original_size, compressed.len(),
+          (original_size as f64 - compressed.len() as f64) / original_size as f64 * 100.0);
+    
+    Ok((compressed, extension.to_string()))
+}
+
+/// Encode image with specified quality and format
+fn encode_image_with_quality(
+    img: &DynamicImage,
+    quality: u8,
+    format: ImageFormat,
+) -> Result<Vec<u8>, String> {
+    use image::imageops::FilterType;
+    
+    // Downsample large images based on quality
+    let (width, height) = (img.width(), img.height());
+    let downsampled = if quality < 90 && (width > 1500 || height > 1500) {
+        let max_dimension = if quality >= 70 {
+            1500.0
+        } else if quality >= 50 {
+            1200.0
+        } else {
+            1000.0
+        };
+        
+        let scale = max_dimension / width.max(height) as f32;
+        if scale < 1.0 {
+            let new_w = (width as f32 * scale) as u32;
+            let new_h = (height as f32 * scale) as u32;
+            debug!("Downsampling: {}x{} -> {}x{}", width, height, new_w, new_h);
+            img.resize_exact(new_w, new_h, FilterType::Lanczos3)
+        } else {
+            img.clone()
+        }
+    } else {
+        img.clone()
+    };
+    
+    let mut output = Vec::new();
+    
+    match format {
+        ImageFormat::Jpeg => {
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, quality);
+            encoder.encode_image(&downsampled)
+                .map_err(|e| format!("JPEG encoding failed: {}", e))?;
+        }
+        ImageFormat::Png => {
+            // Map quality to PNG compression level (inverse: higher quality = less compression)
+            let compression_level = if quality >= 90 {
+                image::codecs::png::CompressionType::Best
+            } else if quality >= 70 {
+                image::codecs::png::CompressionType::Default
+            } else {
+                image::codecs::png::CompressionType::Fast
+            };
+            
+            let encoder = image::codecs::png::PngEncoder::new_with_quality(
+                &mut output,
+                compression_level,
+                image::codecs::png::FilterType::Adaptive,
+            );
+            
+            // Use write_image method for image 0.24
+            use image::ImageEncoder;
+            encoder.write_image(
+                downsampled.as_bytes(),
+                downsampled.width(),
+                downsampled.height(),
+                downsampled.color(),
+            )
+            .map_err(|e| format!("PNG encoding failed: {}", e))?;
+        }
+        ImageFormat::WebP => {
+            // WebP support is limited in image 0.24, use lossless encoding
+            let encoder = image::codecs::webp::WebPEncoder::new_lossless(&mut output);
+            use image::ImageEncoder;
+            encoder.write_image(
+                downsampled.as_bytes(),
+                downsampled.width(),
+                downsampled.height(),
+                downsampled.color(),
+            )
+            .map_err(|e| format!("WebP encoding failed: {}", e))?;
+        }
+        _ => return Err(format!("Unsupported format: {:?}", format)),
+    }
+    
+    Ok(output)
 }
 

@@ -5,8 +5,7 @@ use rfd::FileDialog;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use log::{info, debug, warn};
-use PDFcompressor::{compress_pdf_bytes};
+use log::{info, warn};
 
 struct PdfCompressor {
     selected_files: Vec<PathBuf>,
@@ -66,7 +65,9 @@ impl PdfCompressor {
 
     fn select_files(&mut self) {
         if let Some(files) = FileDialog::new()
+            .add_filter("All supported", &["pdf", "jpg", "jpeg", "png", "webp", "tiff", "tif"])
             .add_filter("PDF files", &["pdf"])
+            .add_filter("Images", &["jpg", "jpeg", "png", "webp", "tiff", "tif"])
             .set_directory(".")
             .pick_files()
         {
@@ -167,7 +168,7 @@ impl PdfCompressor {
 
         thread::spawn(move || {
             for file_path in files {
-                let result = compress_single_pdf(&file_path, jpeg_quality);
+                let result = compress_single_file(&file_path, jpeg_quality);
                 let _ = tx.send(result);
             }
         });
@@ -196,7 +197,7 @@ impl PdfCompressor {
     }
 }
 
-fn compress_single_pdf(input_path: &Path, compression_level: u8) -> CompressionResult {
+fn compress_single_file(input_path: &Path, compression_level: u8) -> CompressionResult {
     let file_name = input_path.file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("Unknown")
@@ -212,67 +213,95 @@ fn compress_single_pdf(input_path: &Path, compression_level: u8) -> CompressionR
     };
     info!("Original file size: {} bytes", original_size);
 
-    // Generate temp output path in system temp directory
-    let temp_dir = std::env::temp_dir();
-    let file_stem = input_path.file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("compressed");
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let output_filename = format!("{}_compressed_{}.pdf", file_stem, timestamp);
-    let output_path = temp_dir.join(&output_filename);
-    info!("Temp output path: {:?}", output_path);
+    // Detect file type by extension
+    let extension = input_path.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    
+    let is_pdf = extension == "pdf";
+    info!("File type: {}", if is_pdf { "PDF" } else { "Image" });
 
     // Read input file and compress using library
     match std::fs::read(input_path) {
         Ok(input_bytes) => {
-            match compress_pdf_bytes(&input_bytes, compression_level) {
-                Ok(compressed_bytes) => {
-                    // Write to temp file
-                    if let Err(e) = std::fs::write(&output_path, &compressed_bytes) {
+            let (compressed_bytes, output_ext) = if is_pdf {
+                match PDFcompressor::compress_pdf_bytes(&input_bytes, compression_level) {
+                    Ok(bytes) => (bytes, "pdf".to_string()),
+                    Err(error) => {
                         return CompressionResult {
                             file_name,
                             original_size,
                             compressed_size: 0,
                             success: false,
-                            error_message: Some(format!("Failed to write output: {}", e)),
+                            error_message: Some(error),
                             compressed_path: None,
                             downloaded: false,
                         };
                     }
-                    
-                    let compressed_size = compressed_bytes.len() as u64;
-                    let reduction = if original_size > 0 {
-                        (original_size as i64 - compressed_size as i64) as f64 / original_size as f64 * 100.0
-                    } else {
-                        0.0
-                    };
-                    
-                    info!("Compressed file size: {} bytes", compressed_size);
-                    info!("Reduction: {:.2}%", reduction);
-                    info!("========================================\n");
-
-                    CompressionResult {
-                        file_name: output_filename,
-                        original_size,
-                        compressed_size,
-                        success: true,
-                        error_message: None,
-                        compressed_path: Some(output_path),
-                        downloaded: false,
+                }
+            } else {
+                match PDFcompressor::compress_image_bytes(&input_bytes, compression_level, None) {
+                    Ok((bytes, ext)) => (bytes, ext),
+                    Err(error) => {
+                        return CompressionResult {
+                            file_name,
+                            original_size,
+                            compressed_size: 0,
+                            success: false,
+                            error_message: Some(error),
+                            compressed_path: None,
+                            downloaded: false,
+                        };
                     }
                 }
-                Err(error) => CompressionResult {
+            };
+            
+            // Generate temp output path in system temp directory
+            let temp_dir = std::env::temp_dir();
+            let file_stem = input_path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("compressed");
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let output_filename = format!("{}_compressed_{}.{}", file_stem, timestamp, output_ext);
+            let output_path = temp_dir.join(&output_filename);
+            info!("Temp output path: {:?}", output_path);
+            
+            // Write to temp file
+            if let Err(e) = std::fs::write(&output_path, &compressed_bytes) {
+                return CompressionResult {
                     file_name,
                     original_size,
                     compressed_size: 0,
                     success: false,
-                    error_message: Some(error),
+                    error_message: Some(format!("Failed to write output: {}", e)),
                     compressed_path: None,
                     downloaded: false,
-                }
+                };
+            }
+            
+            let compressed_size = compressed_bytes.len() as u64;
+            let reduction = if original_size > 0 {
+                (original_size as i64 - compressed_size as i64) as f64 / original_size as f64 * 100.0
+            } else {
+                0.0
+            };
+            
+            info!("Compressed file size: {} bytes", compressed_size);
+            info!("Reduction: {:.2}%", reduction);
+            info!("========================================\n");
+
+            CompressionResult {
+                file_name: output_filename,
+                original_size,
+                compressed_size,
+                success: true,
+                error_message: None,
+                compressed_path: Some(output_path),
+                downloaded: false,
             }
         }
         Err(e) => CompressionResult {
@@ -298,14 +327,14 @@ impl eframe::App for PdfCompressor {
         }
         
         CentralPanel::default().show(ctx, |ui| {
-            ui.heading(RichText::new("PDF Compressor").size(24.0).strong());
+            ui.heading(RichText::new("PDF & Image Compressor").size(24.0).strong());
             ui.add_space(10.0);
             ui.separator();
 
             // File selection section
             ui.add_space(5.0);
             ui.horizontal(|ui| {
-                if ui.button(RichText::new("📁 Select PDF Files").size(16.0)).clicked() {
+                if ui.button(RichText::new("📁 Select Files (PDF or Images)").size(16.0)).clicked() {
                     self.select_files();
                 }
 
@@ -400,7 +429,7 @@ impl eframe::App for PdfCompressor {
             }
 
             ui.horizontal(|ui| {
-                let button = egui::Button::new(RichText::new("🗜️ Compress PDFs").size(16.0).strong());
+                let button = egui::Button::new(RichText::new("🗜️ Compress Files").size(16.0).strong());
                 if ui.add_enabled(!self.is_processing && !self.selected_files.is_empty(), button).clicked() {
                     self.compress_files();
                 }
@@ -558,13 +587,13 @@ fn main() -> eframe::Result<()> {
         .format_timestamp(None)
         .init();
     
-    info!("PDF Compressor starting...");
+    info!("PDF & Image Compressor starting...");
     
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([800.0, 600.0])
             .with_min_inner_size([600.0, 400.0])
-            .with_title("PDF Compressor")
+            .with_title("PDF & Image Compressor")
             .with_icon(std::sync::Arc::new(
                 egui::IconData {
                     rgba: vec![],
@@ -576,7 +605,7 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "PDF Compressor",
+        "PDF & Image Compressor",
         options,
         Box::new(|_cc| {
             // Set up the app with context

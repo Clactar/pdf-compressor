@@ -1,0 +1,344 @@
+# PDF & Image Compressor API - LLM Documentation
+
+This is the complete API reference for the PDF & Image Compressor service. This document is optimized for LLM consumption.
+
+## SERVICE OVERVIEW
+
+This API compresses PDF documents and images (JPEG, PNG, WebP, TIFF) with configurable quality settings. It automatically detects file types and applies appropriate compression algorithms.
+
+## AUTHENTICATION
+
+Method: API Key in HTTP headers
+- Header name: "X-API-Key" OR "Authorization: Bearer {key}"
+- Required: Only if API_KEY environment variable is set on server
+- If API_KEY not configured: Authentication disabled (backward compatibility)
+
+## BASE ENDPOINT
+
+POST /api/compress
+- Primary endpoint for all file compression
+- Accepts: PDF and image files
+- Returns: Compressed file with metadata headers
+
+POST /api/pdf
+- Legacy alias for /api/compress
+- Deprecated but still supported
+- Identical functionality to /api/compress
+
+GET /health
+- Health check endpoint
+- No authentication required
+- Returns: "OK" (200 status) if server running
+
+## REQUEST FORMAT
+
+Content-Type: multipart/form-data
+
+PARAMETERS:
+
+1. file (REQUIRED)
+   - Type: Binary file upload
+   - Field names accepted: "file" OR "pdf" OR "image"
+   - Supported formats: PDF (.pdf), JPEG (.jpg, .jpeg), PNG (.png), WebP (.webp), TIFF (.tiff, .tif)
+   - Maximum size: 100 MB
+   - File type auto-detected via magic bytes (header inspection)
+
+2. compression (OPTIONAL)
+   - Type: Integer
+   - Field names accepted: "compression" OR "quality" OR "level"
+   - Range: 10-95
+   - Default: 75
+   - Description: Compression level where higher number = more compression/lower quality
+   - Clamped automatically if outside range
+
+3. output_format (OPTIONAL, images only)
+   - Type: String
+   - Field names accepted: "output_format" OR "format"
+   - Values: "auto", "jpeg", "jpg", "png", "webp"
+   - Default: "auto"
+   - Ignored for PDF files (PDFs always output as PDF)
+
+## COMPRESSION LEVEL MAPPING
+
+The compression parameter maps to JPEG quality inversely:
+
+Level 10-25: Minimal compression
+- JPEG quality: 90-100
+- Use case: High quality, minimal size reduction
+- Best for: Legal documents, archival
+
+Level 25-50: Moderate compression
+- JPEG quality: 70-90
+- Use case: Good balance between quality and size
+- Best for: General documents
+
+Level 50-75: High compression (includes default 75)
+- JPEG quality: 50-70
+- Use case: Noticeable size reduction, acceptable quality
+- Best for: Web documents, email attachments
+
+Level 75-95: Maximum compression
+- JPEG quality: 25-50
+- Use case: Smallest files, visible quality loss
+- Best for: Thumbnails, previews, extreme size constraints
+
+## OUTPUT FORMAT BEHAVIOR (IMAGES ONLY)
+
+auto (default):
+- For JPEG/WebP input: Outputs JPEG
+- For PNG/TIFF input: Compresses to both JPEG and PNG, compares sizes
+  - If PNG size <= JPEG size * 1.1 (within 10%): Returns PNG (preserves lossless quality)
+  - If JPEG significantly smaller: Returns JPEG
+- Intelligent selection for best quality/size ratio
+
+jpeg or jpg:
+- Forces JPEG output (lossy compression)
+- Works for all input image formats
+- Smaller files, some quality loss
+
+png:
+- Forces PNG output (lossless compression)
+- Works for all input image formats
+- Larger files, no quality loss
+- Preserves transparency
+
+webp:
+- Forces WebP output
+- Note: Current implementation (image crate v0.24) uses lossless WebP only
+- May not provide size reduction
+
+## RESPONSE FORMAT
+
+SUCCESS (HTTP 200):
+
+Headers:
+- Content-Type: "application/pdf" OR "image/jpeg" OR "image/png" OR "image/webp"
+- Content-Disposition: 'attachment; filename="compressed.{ext}"'
+- X-Original-Size: {bytes} (integer, original file size)
+- X-Compressed-Size: {bytes} (integer, compressed file size)
+- X-Reduction-Percentage: {percent} (float, e.g., "67.45")
+
+Body: Binary data of compressed file
+
+AUTHENTICATION ERROR (HTTP 401):
+{
+  "error": "Invalid API key"
+}
+OR
+{
+  "error": "Missing API key. Provide X-API-Key header or Authorization: Bearer <key>"
+}
+
+VALIDATION ERROR (HTTP 400):
+{
+  "error": "No file provided. Use 'file', 'pdf', or 'image' field name."
+}
+OR
+{
+  "error": "Empty file"
+}
+OR
+{
+  "error": "Invalid multipart data: {details}"
+}
+
+PROCESSING ERROR (HTTP 500):
+{
+  "error": "PDF compression failed: {details}"
+}
+OR
+{
+  "error": "Image compression failed: {details}"
+}
+
+## FILE TYPE DETECTION
+
+Detection method: Magic bytes (primary), file extension (fallback)
+
+Supported file types and detection:
+- PDF: Magic bytes "%PDF" OR MIME "application/pdf"
+- JPEG: Magic bytes inspection OR extensions .jpg/.jpeg
+- PNG: Magic bytes inspection OR extension .png
+- WebP: Magic bytes inspection OR extension .webp
+- TIFF: Magic bytes inspection OR extensions .tiff/.tif
+
+## COMPRESSION ALGORITHMS
+
+PDF Compression Process:
+1. Remove duplicate objects in document structure
+2. Compress embedded images using JPEG encoding (quality based on compression parameter)
+3. Remove metadata objects (XMP, document info)
+4. Apply FlateDecode (zlib) to remaining streams
+5. Prune unused objects (3 compression rounds)
+6. Final cleanup and compression pass
+
+Image Compression Process:
+1. Decode source image to raw pixel data
+2. Downsample large images (if dimension > 1500px):
+   - Quality >= 70: Max dimension 1500px
+   - Quality >= 50: Max dimension 1200px
+   - Quality < 50: Max dimension 1000px
+   - Uses Lanczos3 filter for high-quality downsampling
+3. Encode with target format and quality setting
+4. If auto format: Compare JPEG vs PNG, select best
+5. Return compressed bytes with format extension
+
+## EXAMPLE REQUESTS
+
+cURL - Compress PDF:
+```
+curl -X POST https://your-domain.com/api/compress \
+  -H "X-API-Key: your_key_here" \
+  -F "file=@document.pdf" \
+  -F "compression=75" \
+  -o compressed.pdf
+```
+
+cURL - Compress image with format selection:
+```
+curl -X POST https://your-domain.com/api/compress \
+  -H "Authorization: Bearer your_key_here" \
+  -F "file=@photo.jpg" \
+  -F "compression=60" \
+  -F "output_format=png" \
+  -o compressed.png
+```
+
+Python example:
+```python
+import requests
+
+url = 'https://your-domain.com/api/compress'
+headers = {'X-API-Key': 'your_key_here'}
+files = {'file': open('document.pdf', 'rb')}
+data = {'compression': 75}
+
+response = requests.post(url, headers=headers, files=files, data=data)
+
+if response.status_code == 200:
+    with open('compressed.pdf', 'wb') as f:
+        f.write(response.content)
+    print(f"Reduced by {response.headers['X-Reduction-Percentage']}%")
+```
+
+JavaScript (Node.js) example:
+```javascript
+const FormData = require('form-data');
+const fs = require('fs');
+const axios = require('axios');
+
+const form = new FormData();
+form.append('file', fs.createReadStream('document.pdf'));
+form.append('compression', '75');
+
+axios.post('https://your-domain.com/api/compress', form, {
+  headers: {
+    ...form.getHeaders(),
+    'X-API-Key': 'your_key_here'
+  },
+  responseType: 'arraybuffer'
+})
+.then(response => {
+  fs.writeFileSync('compressed.pdf', response.data);
+  console.log('Reduction:', response.headers['x-reduction-percentage'] + '%');
+});
+```
+
+## ENVIRONMENT VARIABLES
+
+API_KEY:
+- Required: No
+- Default: None (authentication disabled)
+- Description: API key for authentication. When set, all requests except /health must include matching key in headers.
+
+PORT:
+- Required: No
+- Default: 3000
+- Description: TCP port number for server to listen on
+
+RUST_LOG:
+- Required: No
+- Default: info
+- Description: Logging verbosity level
+- Valid values: error, warn, info, debug, trace
+
+## RATE LIMITS
+
+Current implementation: No rate limiting enforced
+Recommended client-side limits:
+- Maximum concurrent requests per client: 10
+- Maximum file size per request: 100 MB
+- Recommended timeout: 60 seconds for files >10MB
+
+## BEST PRACTICES FOR LLM AGENTS
+
+1. File Type Selection:
+   - Always check file extension or content-type before calling API
+   - Verify file is one of supported types (PDF, JPEG, PNG, WebP, TIFF)
+
+2. Compression Level Selection:
+   - For user documents: Use 70-80
+   - For photos: Use 60-75
+   - For legal/archival: Use 10-30
+   - For web optimization: Use 75-85
+   - Default 75 is safe for most use cases
+
+3. Output Format Selection:
+   - For photos: Leave as "auto" or explicitly use "jpeg"
+   - For graphics/logos with transparency: Use "png"
+   - For screenshots: Leave as "auto" (will intelligently choose)
+   - When unsure: Use "auto" (default)
+
+4. Error Handling:
+   - Always check HTTP status code first
+   - Parse error JSON for specific error messages
+   - Check X-Compressed-Size header to verify compression occurred
+   - If X-Compressed-Size >= X-Original-Size, compression was ineffective
+
+5. Response Processing:
+   - Save binary response body to file with appropriate extension
+   - Extract metadata from response headers for user feedback
+   - Calculate and display reduction percentage from headers
+
+6. Performance Optimization:
+   - For multiple files: Submit in parallel (max 10 concurrent)
+   - For large files (>10MB): Use streaming upload if library supports
+   - Set appropriate timeout (30-60 seconds for large files)
+
+## COMMON EDGE CASES
+
+1. Already compressed files:
+   - PDF: May not reduce further if already optimized
+   - JPEG: Will re-encode, may increase size if already at high compression
+   - Check X-Compressed-Size vs X-Original-Size to detect this
+
+2. Files with transparency:
+   - PNG with transparency: JPEG conversion will lose alpha channel (transparency becomes white/black)
+   - Recommend using output_format=png for transparent images
+
+3. Very small files (<10KB):
+   - Compression overhead may result in same or larger file size
+   - Algorithm still applies but benefits minimal
+
+4. Unsupported or corrupted files:
+   - Returns 500 error with descriptive message
+   - Check error message for specific failure reason (e.g., "Failed to load PDF", "Failed to detect image format")
+
+## API VERSION
+
+Current version: 0.1.0
+Stability: Production-ready
+Breaking changes: None planned
+Backward compatibility: /api/pdf endpoint maintained indefinitely for existing integrations
+
+## TECHNICAL DETAILS FOR CONTEXT
+
+Implementation: Rust (Actix/Axum web framework)
+PDF library: lopdf 0.32
+Image library: image 0.24
+Compression: flate2 (zlib), JPEG encoding, PNG encoding
+Deployment: Docker container or standalone binary
+Architecture: Stateless, suitable for horizontal scaling
+
+This completes the LLM-optimized API documentation.
+
