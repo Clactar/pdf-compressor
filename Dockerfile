@@ -38,8 +38,10 @@ USER appuser
 # Expose port 3000
 EXPOSE 3000
 
-# Set environment variable for port (can be overridden)
+# Set environment variables (can be overridden)
 ENV PORT=3000
+# PDF_COMPRESSION_ROUNDS=2 (default: 2, range: 1-5)
+# Lower = faster, higher = better compression
 
 # Run the API server
 CMD ["pdfcompressor-api"]

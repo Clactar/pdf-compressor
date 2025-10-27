@@ -240,9 +240,22 @@ async fn compress_file(mut multipart: Multipart) -> Result<Response, (StatusCode
           compression_level,
           if is_pdf { "PDF" } else { "Image" });
     
-    // Compress based on file type
+    // Compress based on file type - offload CPU-intensive work to blocking thread pool
     let (compressed_data, content_type, filename) = if is_pdf {
-        let compressed = crate::compress_pdf_bytes(&file_data, compression_level).map_err(|e| {
+        let compressed = tokio::task::spawn_blocking(move || {
+            crate::compress_pdf_bytes(&file_data, compression_level)
+        })
+        .await
+        .map_err(|e| {
+            error!("PDF compression task failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("PDF compression task failed: {}", e),
+                }),
+            )
+        })?
+        .map_err(|e| {
             error!("PDF compression failed: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -253,11 +266,23 @@ async fn compress_file(mut multipart: Multipart) -> Result<Response, (StatusCode
         })?;
         (compressed, "application/pdf", "compressed.pdf")
     } else {
-        let (compressed, ext) = crate::compress_image_bytes(
-            &file_data,
-            compression_level,
-            output_format.as_deref(),
-        )
+        let (compressed, ext) = tokio::task::spawn_blocking(move || {
+            crate::compress_image_bytes(
+                &file_data,
+                compression_level,
+                output_format.as_deref(),
+            )
+        })
+        .await
+        .map_err(|e| {
+            error!("Image compression task failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Image compression task failed: {}", e),
+                }),
+            )
+        })?
         .map_err(|e| {
             error!("Image compression failed: {}", e);
             (

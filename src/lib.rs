@@ -1,7 +1,8 @@
 use lopdf::{Document, Object, Stream};
-use std::collections::BTreeMap;
 use log::{info, debug};
 use image::{DynamicImage, ImageFormat};
+use rayon::prelude::*;
+use std::sync::Mutex;
 
 // Export API module for the api binary
 pub mod api;
@@ -72,9 +73,15 @@ pub fn compress_pdf_bytes(input_bytes: &[u8], compression_level: u8) -> Result<V
     let metadata_removed = before_metadata - doc.objects.len();
     info!("Removed {} metadata objects", metadata_removed);
     
-    // Perform multiple rounds of compression
-    info!("Performing multiple compression rounds...");
-    for i in 0..3 {
+    // Perform compression rounds (configurable via env var for performance tuning)
+    let compression_rounds = std::env::var("PDF_COMPRESSION_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(2) // Default to 2 rounds for better latency vs quality balance
+        .min(5); // Cap at 5 rounds max
+    
+    info!("Performing {} compression round(s)...", compression_rounds);
+    for i in 0..compression_rounds {
         debug!("Compression round {}", i + 1);
         doc.compress();
         doc.prune_objects();
@@ -99,18 +106,27 @@ pub fn compress_pdf_bytes(input_bytes: &[u8], compression_level: u8) -> Result<V
 }
 
 fn remove_duplicate_objects(doc: &mut Document) -> usize {
-    let mut unique_streams: BTreeMap<Vec<u8>, lopdf::ObjectId> = BTreeMap::new();
+    use ahash::AHashMap;
+    use std::hash::{Hash, Hasher};
+    use ahash::AHasher;
+    
+    // Use hash-based deduplication to avoid expensive content cloning
+    let mut unique_streams: AHashMap<u64, lopdf::ObjectId> = AHashMap::new();
     let mut to_replace: Vec<(lopdf::ObjectId, lopdf::ObjectId)> = Vec::new();
 
-    // Find duplicate streams
+    // Find duplicate streams using content hash
     for (obj_id, object) in doc.objects.iter() {
         if let Object::Stream(stream) = object {
-            let content = stream.content.clone();
-            if let Some(&existing_id) = unique_streams.get(&content) {
+            // Hash the content without cloning
+            let mut hasher = AHasher::default();
+            stream.content.hash(&mut hasher);
+            let content_hash = hasher.finish();
+            
+            if let Some(&existing_id) = unique_streams.get(&content_hash) {
                 to_replace.push((*obj_id, existing_id));
                 debug!("Found duplicate stream: {:?} is same as {:?}", obj_id, existing_id);
             } else {
-                unique_streams.insert(content, *obj_id);
+                unique_streams.insert(content_hash, *obj_id);
             }
         }
     }
@@ -121,62 +137,77 @@ fn remove_duplicate_objects(doc: &mut Document) -> usize {
 fn compress_all_streams(doc: &mut Document, settings: &CompressionSettings) -> Result<(), String> {
     let mut objects_to_update = Vec::new();
 
-    // Find all stream objects
+    // Find all stream objects and clone the streams we need to process
     for (obj_id, object) in doc.objects.iter() {
         if let Object::Stream(ref stream) = object {
             let is_image = is_image_stream(stream);
             let original_size = stream.content.len();
-            objects_to_update.push((*obj_id, is_image, original_size));
+            objects_to_update.push((*obj_id, stream.clone(), is_image, original_size));
         }
     }
 
     let total_streams = objects_to_update.len();
-    info!("Processing {} streams", total_streams);
+    info!("Processing {} streams in parallel", total_streams);
     
-    let mut compressed_count = 0;
-    let mut image_count = 0;
-    let mut total_saved = 0i64;
+    let compressed_count = Mutex::new(0);
+    let image_count = Mutex::new(0);
+    let total_saved = Mutex::new(0i64);
 
-    // Compress each stream
-    for (obj_id, is_image, original_size) in objects_to_update {
-        if let Some(Object::Stream(stream)) = doc.objects.get(&obj_id).cloned() {
-            if is_image {
-                image_count += 1;
+    // Compress streams in parallel using rayon
+    // Note: Returning None means "don't update this stream" - the original remains in the document
+    let compressed_streams: Vec<_> = objects_to_update
+        .par_iter()
+        .filter_map(|(obj_id, stream, is_image, original_size)| {
+            if *is_image {
+                *image_count.lock().unwrap() += 1;
                 debug!("Processing image stream {:?}, original size: {} bytes", obj_id, original_size);
             }
             
-            let compressed = if is_image {
-                match compress_image_stream(&stream, settings.quality) {
+            let compressed = if *is_image {
+                match compress_image_stream(stream, settings.quality) {
                     Ok(s) => s,
                     Err(e) => {
-                        debug!("Image compression failed for {:?}: {}", obj_id, e);
-                        stream.clone()
+                        debug!("Image compression failed for {:?}: {}, keeping original", obj_id, e);
+                        // Return None to skip updating - original stream preserved in document
+                        return None;
                     }
                 }
             } else {
-                compress_generic_stream(&stream)
+                compress_generic_stream(stream)
             };
             
             let new_size = compressed.content.len();
             
-            // Only update if it's actually smaller
-            if new_size < original_size {
-                let saved = original_size as i64 - new_size as i64;
-                total_saved += saved;
-                compressed_count += 1;
+            // Only update if compressed version is smaller
+            if new_size < *original_size {
+                let saved = *original_size as i64 - new_size as i64;
+                *total_saved.lock().unwrap() += saved;
+                *compressed_count.lock().unwrap() += 1;
                 debug!("Compressed {:?}: {} -> {} bytes (saved {} bytes)", 
                        obj_id, original_size, new_size, saved);
-                doc.objects.insert(obj_id, Object::Stream(compressed));
+                Some((*obj_id, compressed))
             } else {
                 debug!("Keeping original {:?}: compressed would be {} bytes (original {})", 
                        obj_id, new_size, original_size);
+                // Return None to skip updating - original stream preserved in document
+                None
             }
-        }
+        })
+        .collect();
+    
+    // Update document with successfully compressed streams only
+    // Streams not in this list remain unchanged in the document
+    for (obj_id, compressed_stream) in compressed_streams {
+        doc.objects.insert(obj_id, Object::Stream(compressed_stream));
     }
 
-    info!("Compressed {}/{} streams", compressed_count, total_streams);
-    info!("Found {} image streams", image_count);
-    info!("Total bytes saved from stream compression: {}", total_saved);
+    let final_compressed = *compressed_count.lock().unwrap();
+    let final_image_count = *image_count.lock().unwrap();
+    let final_saved = *total_saved.lock().unwrap();
+
+    info!("Compressed {}/{} streams", final_compressed, total_streams);
+    info!("Found {} image streams", final_image_count);
+    info!("Total bytes saved from stream compression: {}", final_saved);
 
     Ok(())
 }
