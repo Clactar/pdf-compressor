@@ -14,6 +14,8 @@ COPY Cargo.toml Cargo.lock ./
 
 # Copy source code
 COPY src ./src
+COPY benches ./benches
+COPY llm.txt ./llm.txt
 
 # Build the API binary in release mode
 RUN cargo build --bin pdfcompressor-api --release --no-default-features --features api
