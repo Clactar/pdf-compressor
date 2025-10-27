@@ -15,6 +15,7 @@ struct PdfCompressor {
     receiver: Option<Receiver<CompressionResult>>,
     compression_level: u8, // 0-100, how much to compress (0=minimal, 100=maximum)
     estimated_size: Option<u64>,
+    is_dragging: bool, // Track if files are being dragged over
 }
 
 impl Default for PdfCompressor {
@@ -27,6 +28,7 @@ impl Default for PdfCompressor {
             receiver: None,
             compression_level: 75, // Default: 75% compression (good balance)
             estimated_size: None,
+            is_dragging: false,
         }
     }
 }
@@ -71,8 +73,26 @@ impl PdfCompressor {
             .set_directory(".")
             .pick_files()
         {
-            self.selected_files = files;
-            // Clear previous results when selecting new files
+            self.add_files(files);
+        }
+    }
+    
+    fn add_files(&mut self, files: Vec<PathBuf>) {
+        // Filter valid file types
+        let valid_extensions = ["pdf", "jpg", "jpeg", "png", "webp", "tiff", "tif"];
+        let mut new_files: Vec<PathBuf> = files.into_iter()
+            .filter(|path| {
+                if let Some(ext) = path.extension() {
+                    valid_extensions.contains(&ext.to_str().unwrap_or("").to_lowercase().as_str())
+                } else {
+                    false
+                }
+            })
+            .collect();
+        
+        if !new_files.is_empty() {
+            self.selected_files.append(&mut new_files);
+            // Clear previous results when adding new files
             self.compression_results.clear();
             // Estimate compressed size
             self.estimate_compressed_size();
@@ -326,15 +346,85 @@ impl eframe::App for PdfCompressor {
             ctx.request_repaint(); // Keep UI responsive
         }
         
+        // Handle file drops
+        ctx.input(|i| {
+            if !i.raw.hovered_files.is_empty() {
+                self.is_dragging = true;
+            }
+            
+            if !i.raw.dropped_files.is_empty() {
+                let paths: Vec<PathBuf> = i.raw.dropped_files.iter()
+                    .filter_map(|f| f.path.clone())
+                    .collect();
+                if !paths.is_empty() {
+                    self.add_files(paths);
+                }
+                self.is_dragging = false;
+            }
+            
+            // Reset dragging state if nothing is being dragged
+            if i.raw.hovered_files.is_empty() && !self.is_dragging {
+                self.is_dragging = false;
+            }
+        });
+        
         CentralPanel::default().show(ctx, |ui| {
-            ui.heading(RichText::new("PDF & Image Compressor").size(24.0).strong());
+            ui.horizontal(|ui| {
+                ui.heading(RichText::new("PDF & Image Compressor").size(24.0).strong());
+                ui.label(RichText::new("v2.1.0").size(14.0).color(Color32::from_rgb(150, 150, 150)));
+            });
             ui.add_space(10.0);
             ui.separator();
 
-            // File selection section
-            ui.add_space(5.0);
+            // Drag and Drop Zone
+            ui.add_space(10.0);
+            let drop_zone_height = 100.0;
+            let drop_zone_rect = ui.available_rect_before_wrap();
+            let drop_zone_rect = egui::Rect::from_min_size(
+                drop_zone_rect.min,
+                egui::vec2(ui.available_width(), drop_zone_height)
+            );
+            
+            let drop_zone_color = if self.is_dragging {
+                Color32::from_rgba_unmultiplied(100, 150, 255, 100)
+            } else {
+                Color32::from_rgba_unmultiplied(60, 60, 80, 50)
+            };
+            
+            ui.painter().rect(
+                drop_zone_rect,
+                5.0,
+                drop_zone_color,
+                egui::Stroke::new(2.0, if self.is_dragging { 
+                    Color32::from_rgb(100, 150, 255) 
+                } else { 
+                    Color32::from_rgb(100, 100, 120) 
+                }),
+            );
+            
+            let drop_text = if self.is_dragging {
+                "📥 Drop files here!"
+            } else {
+                "📁 Drag & Drop PDF or Image Files Here\n(PDF, JPG, PNG, WEBP, TIFF)"
+            };
+            
+            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(drop_zone_rect), |ui| {
+                ui.centered_and_justified(|ui| {
+                    ui.label(RichText::new(drop_text)
+                        .size(if self.is_dragging { 20.0 } else { 16.0 })
+                        .color(if self.is_dragging { 
+                            Color32::from_rgb(150, 200, 255) 
+                        } else { 
+                            Color32::from_rgb(150, 150, 170) 
+                        }));
+                });
+            });
+            
+            ui.add_space(drop_zone_height + 10.0);
+
+            // File selection button
             ui.horizontal(|ui| {
-                if ui.button(RichText::new("📁 Select Files (PDF or Images)").size(16.0)).clicked() {
+                if ui.button(RichText::new("📁 Or Browse Files").size(16.0)).clicked() {
                     self.select_files();
                 }
 
@@ -594,6 +684,7 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([800.0, 600.0])
             .with_min_inner_size([600.0, 400.0])
             .with_title("PDF & Image Compressor")
+            .with_drag_and_drop(true)
             .with_icon(std::sync::Arc::new(
                 egui::IconData {
                     rgba: vec![],
