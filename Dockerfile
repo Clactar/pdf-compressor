@@ -16,7 +16,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 
 # Build the API binary in release mode
-RUN cargo build --bin pdfcompressor-api --release --no-default-features
+RUN cargo build --bin pdfcompressor-api --release --no-default-features --features api
 
 # Runtime stage
 FROM debian:bookworm-slim
